@@ -82,3 +82,34 @@ em_gmm <- function(x, init, tol = 1e-8, max_iter = 2000,
        gamma = e_step(x, pi[o], mu[o], sigma2[o])$gamma,
        monotone = all(diff(loglik_hist) > -1e-8))
 }
+
+# Starting-value helpers
+# moments of a hard partition (cluster labels cl = 1..K)
+init_from_labels <- function(x, cl, K) {
+  list(pi     = tabulate(cl, K) / length(x),
+       mu     = sapply(1:K, function(k) mean(x[cl == k])),
+       sigma2 = sapply(1:K, function(k) if (sum(cl == k) > 1) var(x[cl == k]) else var(x)))
+}
+init_kmeans <- function(x, K) init_from_labels(x, kmeans(x, K, nstart = 10)$cluster, K)
+init_random <- function(x, K) list(pi = rep(1 / K, K), mu = sample(x, K),
+                                   sigma2 = rep(var(x), K))
+
+# best of several starts: k-means + n_random random starts, keep the highest
+# log-likelihood among non-degenerate runs
+em_best <- function(x, K, n_random = 10, ...) {
+  if (K == 1) {                                 # closed-form MLE, no EM needed
+    s2 <- mean((x - mean(x))^2)
+    return(list(pi = 1, mu = mean(x), sigma2 = s2, K = 1, iterations = 0,
+                loglik = sum(dnorm(x, mean(x), sqrt(s2), log = TRUE)),
+                status = "closed form"))
+  }
+  fits <- c(list(em_gmm(x, init_kmeans(x, K), ...)),
+            lapply(1:n_random, function(r) em_gmm(x, init_random(x, K), ...)))
+  ok <- sapply(fits, function(f) f$status != "degenerate")
+  fits[ok][[which.max(sapply(fits[ok], `[[`, "loglik"))]]
+}
+
+# mixture density on a grid (for plots)
+gmm_density <- function(grid, fit)
+  rowSums(sapply(seq_len(fit$K), function(k)
+    fit$pi[k] * dnorm(grid, fit$mu[k], sqrt(fit$sigma2[k]))))
