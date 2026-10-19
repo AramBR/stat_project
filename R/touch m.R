@@ -13,3 +13,8 @@ log_sum_exp <- function(L) {
   m <- apply(L, 1, max)
   m + log(rowSums(exp(L - m)))
 }
+
+# 1) Observed-data log-likelihood  l(theta) = sum_i log sum_k pi_k phi(x_i)
+gmm_loglikelihood <- function(x, pi, mu, sigma2) {
+  sum(log_sum_exp(log_dens_matrix(x, pi, mu, sigma2)))
+}
