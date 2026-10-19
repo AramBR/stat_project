@@ -5,3 +5,11 @@ log_dens_matrix <- function(x, pi, mu, sigma2) {
   sapply(seq_len(K), function(k)
     log(pi[k]) + dnorm(x, mean = mu[k], sd = sqrt(sigma2[k]), log = TRUE))
 }
+
+# log_sum_exp(): row-wise log(sum(exp(.))) computed stably.
+# Subtracting the row maximum before exponentiating prevents underflow.
+log_sum_exp <- function(L) {
+  L <- as.matrix(L)
+  m <- apply(L, 1, max)
+  m + log(rowSums(exp(L - m)))
+}
