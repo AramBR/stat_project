@@ -45,3 +45,40 @@ m_step <- function(x, gamma, var_floor) {
   list(pi = pi, mu = mu, sigma2 = sigma2,
        degenerate = hit_floor || any(nk < 1))
 }
+
+# 4) Full EM loop
+#    init      : list(pi, mu, sigma2) of starting values
+#    tol       : stop when |l(t) - l(t-1)| < tol * (1 + |l(t-1)|)  (relative)
+#    max_iter  : hard limit on the number of iterations
+#    Returns final estimates (sorted so that mu_1 < mu_2 < ...), the
+#    log-likelihood history, number of iterations and convergence status.
+# ---------------------------------------------------------------------------
+em_gmm <- function(x, init, tol = 1e-8, max_iter = 2000,
+                   var_floor = (0.01 * sd(x))^2) {
+  pi <- init$pi; mu <- init$mu; sigma2 <- init$sigma2
+  loglik_hist <- numeric(0)
+  status <- "max_iter reached"
+  for (iter in 1:max_iter) {
+    E <- e_step(x, pi, mu, sigma2)
+    loglik_hist <- c(loglik_hist, E$loglik)
+    if (iter > 1) {
+      change <- loglik_hist[iter] - loglik_hist[iter - 1]
+      if (abs(change) < tol * (1 + abs(loglik_hist[iter - 1]))) {
+        status <- "converged"; break
+      }
+    }
+    M <- m_step(x, E$gamma, var_floor)
+    pi <- M$pi; mu <- M$mu; sigma2 <- M$sigma2
+    if (M$degenerate) {
+      status <- "degenerate"
+      loglik_hist <- c(loglik_hist, gmm_loglikelihood(x, pi, mu, sigma2))
+      break
+    }
+  }
+  o <- order(mu)                   
+  list(pi = pi[o], mu = mu[o], sigma2 = sigma2[o], K = length(mu),
+       loglik = tail(loglik_hist, 1), loglik_hist = loglik_hist,
+       iterations = length(loglik_hist) - 1, status = status,
+       gamma = e_step(x, pi[o], mu[o], sigma2[o])$gamma,
+       monotone = all(diff(loglik_hist) > -1e-8))
+}
