@@ -1,0 +1,17 @@
+avelacnel AIC, BIC; done
+no standard errors;
+no uncertainty of classification
+no analysis of convergence rate
+no comparison with other optimizers done
+no validation against reference implementation done
+-- degenerate runs are discarded
+yntacqayin grafik
+
+
+Model selection (BIC/ICL, K sweep) and validation against mclust/mixtools.
+Standard errors / bootstrap CIs and CI coverage in the simulation.
+Extending the simulation over n, π, and unequal variances, with the Bayes-optimal error as a benchmark.
+The singularity demonstration, MAP/penalized EM, and the multi-start analysis.
+Convergence-rate analysis and acceleration.
+Visualizations of EM mechanics and a derivation section.
+Multivariate and other generalizations.
