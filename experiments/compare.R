@@ -1,10 +1,26 @@
 # ==================================================================
-# Comparison of our scratch EM with general-purpose optimizers
-# and with library EM implementations (mixtools, mclust)
+# Comparison of our scratch EM with a published EM implementation and with a
+# general-purpose optimizer
 # Data: Old Faithful waiting times, K = 2
 #
-# Optional packages (sections are skipped if missing):
-#   install.packages(c("mixtools", "mclust"))
+#   EM (ours)  - the algorithm of this project
+#   mixtools   - mixtools::normalmixEM, the standard EM for normal mixtures
+#                in R (install.packages("mixtools"))
+#   BFGS       - a quasi-Newton optimizer (stats::optim); R estimates the
+#                gradient numerically from extra likelihood evaluations
+#
+# Note on mixtools: with its default settings normalmixEM does NOT run plain
+# EM but ECM (Expectation / Conditional Maximization, Meng & Rubin 1993).
+# Its code switches ECM on whenever the variances are allowed to differ
+# (the line `ECM <- ECM || ... || any(sdcat != 1)` is always TRUE then).
+# One ECM iteration:
+#   1. E-step, then update the weights and the means
+#   2. a second E-step with the new means, then update the weights again
+#      and the variances
+# So each iteration costs two E-steps instead of one. ECM still never lowers
+# the log-likelihood and reaches the same maximum, but it follows a
+# different path. (Verified: coding these steps by hand reproduces
+# normalmixEM's output to machine precision.)
 # ==================================================================
 library(dplyr)
 library(tidyr)
@@ -15,38 +31,25 @@ source("R/helpers.R")
 
 theme_set(theme_minimal(base_size = 12) + theme(legend.position = "bottom"))
 
-has_mixtools <- requireNamespace("mixtools", quietly = TRUE)
-has_mclust <- requireNamespace("mclust", quietly = TRUE)
+if (!requireNamespace("mixtools", quietly = TRUE)) {
+    stop("Please install mixtools first: install.packages(\"mixtools\")")
+}
 
 method_cols <- c(
     "EM (ours)" = "#1b9e77",
-    "Nelder-Mead" = "#d95f02",
-    "BFGS (num. grad)" = "#7570b3",
-    "BFGS (analytic grad)" = "#e7298a",
-    "L-BFGS-B" = "#66a61e",
-    "nlm" = "#e6ab02",
-    "mixtools::normalmixEM" = "#a6761d",
-    "mclust::Mclust" = "#666666"
+    "mixtools (ECM)" = "#e6ab02",
+    "BFGS" = "#7570b3"
 )
-
-core_methods <- c(
-    "EM (ours)", "Nelder-Mead", "BFGS (num. grad)",
-    "BFGS (analytic grad)", "L-BFGS-B", "nlm"
-)
-lib_methods <- c(
-    if (has_mixtools) "mixtools::normalmixEM",
-    if (has_mclust) "mclust::Mclust"
-)
-all_methods <- c(core_methods, lib_methods)
-# methods that accept our starting values and report a trace
-traced_methods <- c(core_methods, if (has_mixtools) "mixtools::normalmixEM")
+methods <- names(method_cols)
 
 # ------------------------------------------------------------------
 # 0. Utilities
 # ------------------------------------------------------------------
 
-# Unconstrained parametrisation for the general optimizers:
-# theta = (logits of pi_2..pi_K, mu_1..mu_K, log sigma_1..log sigma_K)
+# General optimizers work on unconstrained numbers, but pi must lie in (0, 1)
+# and sigma2 must be positive. So they optimize over
+#   theta = (log(pi_2 / pi_1), mu_1, mu_2, log sigma_1, log sigma_2)
+# and we convert back and forth.
 pack_par <- function(pi, mu, sigma2) {
     c(log(pi[-1] / pi[1]), mu, 0.5 * log(sigma2))
 }
@@ -68,10 +71,9 @@ sort_par <- function(par) {
     list(pi = par$pi[o], mu = par$mu[o], sigma2 = par$sigma2[o])
 }
 
-# Negative log-likelihood (and its gradient) with bookkeeping.
-# "cost" counts one unit per likelihood evaluation or gradient evaluation
-# (each is roughly one E-step), so that EM iterations and optimizer calls
-# can be put on the same horizontal axis.
+# Negative log-likelihood with bookkeeping.
+# "cost" counts likelihood evaluations (each costs about as much as one
+# E-step), so EM iterations and optimizer calls share the same x-axis.
 make_traced <- function(x, K, var_floor) {
     env <- new.env()
     env$cost <- 0
@@ -94,24 +96,7 @@ make_traced <- function(x, K, var_floor) {
         env$theta_v[[length(env$theta_v) + 1]] <- theta
         -ll
     }
-
-    # Analytic gradient of the NEGATIVE log-likelihood in theta.
-    # Uses the E-step responsibilities (Fisher's identity).
-    gr <- function(theta) {
-        env$cost <- env$cost + 1
-        p <- unpack_par(theta, K)
-        s2 <- pmax(p$sigma2, var_floor)
-        G <- e_step(x, p$pi, p$mu, s2)$gamma
-        g_a <- colSums(G)[-1] - length(x) * p$pi[-1]
-        g_mu <- sapply(seq_len(K), function(k) {
-            sum(G[, k] * (x - p$mu[k])) / s2[k]
-        })
-        g_ls <- sapply(seq_len(K), function(k) {
-            sum(G[, k] * ((x - p$mu[k])^2 / s2[k] - 1))
-        })
-        -c(g_a, g_mu, g_ls)
-    }
-    list(f = f, gr = gr, env = env)
+    list(f = f, env = env)
 }
 
 # EM path in (mu_1, mu_2) space (K = 2), re-using e_step / m_step
@@ -135,94 +120,99 @@ failed_run <- function(method) {
     list(
         method = method,
         par = list(pi = rep(NA_real_, 2), mu = rep(NA_real_, 2), sigma2 = rep(NA_real_, 2)),
-        loglik = NA_real_, cost = NA_real_, time_ms = NA_real_,
-        converged = FALSE,
+        loglik = NA_real_, cost = NA_real_, iterations = NA_real_,
+        converged = FALSE, restarted = NA,
         trace = data.frame(cost = numeric(0), loglik = numeric(0)),
         path = data.frame(mu1 = numeric(0), mu2 = numeric(0))
     )
 }
 
+# Run mixtools::normalmixEM quietly (it prints the iteration count itself)
+run_mixtools <- function(x, init, K, tol, maxit) {
+    invisible(utils::capture.output(
+        fit <- mixtools::normalmixEM(
+            x, lambda = init$pi, mu = init$mu, sigma = sqrt(init$sigma2),
+            k = K, epsilon = tol, maxit = maxit, verb = FALSE
+        )
+    ))
+    fit
+}
+
+# Path of mixtools in (mu_1, mu_2) space. normalmixEM does not store its
+# parameters per iteration, so it is re-run with maxit = 1, 2, ... from the
+# same start (it is deterministic, so this reproduces the same path).
+mixtools_path <- function(x, init, n_iter, K = 2, tol = 1e-10) {
+    out <- vector("list", n_iter + 1)
+    out[[1]] <- data.frame(mu1 = min(init$mu), mu2 = max(init$mu))
+    for (i in seq_len(n_iter)) {
+        m <- sort(run_mixtools(x, init, K, tol, maxit = i)$mu)
+        out[[i + 1]] <- data.frame(mu1 = m[1], mu2 = m[2])
+    }
+    do.call(rbind, out)
+}
+
 # Run one method from given starting values.
-# Returns the final parameters, the TRUE log-likelihood recomputed with our own
+# Returns the final parameters, the log-likelihood recomputed with our own
 # function (so every method is judged by the same yardstick), the cost, the
-# elapsed time and a log-likelihood trace (best so far vs cost).
+# number of iterations (EM methods only) and a log-likelihood trace (best
+# value so far vs cost).
+# "restarted" is TRUE when mixtools abandoned our starting values because a
+# variance collapsed and restarted from its own random values; such a run is
+# not a same-start comparison.
 run_method <- function(
     method, x, init, K = 2, maxit = 5000, tol = 1e-10,
     var_floor = (0.01 * stats::sd(x))^2, record_path = FALSE
 ) {
     theta0 <- pack_par(init$pi, init$mu, init$sigma2)
-    t0 <- proc.time()[["elapsed"]]
-    out <- tryCatch(
+    tryCatch(
         {
             path <- data.frame(mu1 = numeric(0), mu2 = numeric(0))
+            iterations <- NA_real_
+            restarted <- FALSE
             if (method == "EM (ours)") {
                 fit <- em_gmm(x, init, tol = tol, max_iter = maxit, var_floor = var_floor)
-                elapsed <- proc.time()[["elapsed"]] - t0
                 par <- list(pi = fit$pi, mu = fit$mu, sigma2 = fit$sigma2)
+                # one E-step (likelihood evaluation) per entry of loglik_hist,
+                # including the one at the starting values
                 trace <- data.frame(cost = seq_along(fit$loglik_hist), loglik = fit$loglik_hist)
-                cost <- fit$iterations
+                cost <- length(fit$loglik_hist)
+                iterations <- fit$iterations
                 converged <- fit$status == "converged"
                 if (record_path) {
                     path <- em_path(x, init, n_iter = min(fit$iterations, 200), var_floor = var_floor)
                     path <- path[, c("mu1", "mu2")]
                 }
-            } else if (method == "mixtools::normalmixEM") {
-                fit <- mixtools::normalmixEM(
-                    x, lambda = init$pi, mu = init$mu, sigma = sqrt(init$sigma2),
-                    k = K, epsilon = tol, maxit = maxit, verb = FALSE
-                )
-                elapsed <- proc.time()[["elapsed"]] - t0
+            } else if (method == "mixtools (ECM)") {
+                fit <- run_mixtools(x, init, K, tol, maxit)
                 par <- list(pi = fit$lambda, mu = fit$mu, sigma2 = fit$sigma^2)
-                trace <- data.frame(cost = seq_along(fit$all.loglik), loglik = fit$all.loglik)
-                cost <- length(fit$all.loglik) - 1
-                converged <- cost < maxit
-            } else if (method == "mclust::Mclust") {
-                # mclust chooses its own (hierarchical) initialisation
-                fit <- mclust::Mclust(x, G = K, modelNames = "V", verbose = FALSE)
-                elapsed <- proc.time()[["elapsed"]] - t0
-                par <- list(
-                    pi = fit$parameters$pro,
-                    mu = fit$parameters$mean,
-                    sigma2 = fit$parameters$variance$sigmasq
+                iterations <- length(fit$all.loglik) - 1
+                # one E-step at the start + two E-steps per ECM iteration
+                trace <- data.frame(
+                    cost = 1 + 2 * (seq_along(fit$all.loglik) - 1),
+                    loglik = fit$all.loglik
                 )
-                trace <- data.frame(cost = numeric(0), loglik = numeric(0))
-                cost <- NA_real_
-                converged <- TRUE
+                cost <- 1 + 2 * iterations
+                converged <- iterations < maxit
+                restarted <- fit$restarts > 0
+                if (record_path) {
+                    path <- mixtools_path(x, init, n_iter = min(iterations, 200), K = K, tol = tol)
+                }
             } else {
                 tr <- make_traced(x, K, var_floor)
-                if (method == "nlm") {
-                    res <- stats::nlm(tr$f, theta0, iterlim = maxit)
-                    theta <- res$estimate
-                    converged <- res$code %in% c(1, 2)
-                } else {
-                    res <- switch(method,
-                        "Nelder-Mead" = stats::optim(
-                            theta0, tr$f, method = "Nelder-Mead",
-                            control = list(maxit = maxit, reltol = tol)
-                        ),
-                        "BFGS (num. grad)" = stats::optim(
-                            theta0, tr$f, method = "BFGS",
-                            control = list(maxit = maxit, reltol = tol)
-                        ),
-                        "BFGS (analytic grad)" = stats::optim(
-                            theta0, tr$f, tr$gr, method = "BFGS",
-                            control = list(maxit = maxit, reltol = tol)
-                        ),
-                        "L-BFGS-B" = stats::optim(
-                            theta0, tr$f, method = "L-BFGS-B",
-                            control = list(maxit = maxit, factr = tol / .Machine$double.eps)
-                        ),
-                        stop("unknown method: ", method)
-                    )
-                    theta <- res$par
-                    converged <- res$convergence == 0
-                }
-                elapsed <- proc.time()[["elapsed"]] - t0
-                p <- unpack_par(theta, K)
+                res <- switch(method,
+                    "BFGS" = stats::optim(
+                        theta0, tr$f, method = "BFGS",
+                        control = list(maxit = maxit, reltol = tol)
+                    ),
+                    stop("unknown method: ", method)
+                )
+                converged <- res$convergence == 0
+                p <- unpack_par(res$par, K)
                 par <- list(pi = p$pi, mu = p$mu, sigma2 = pmax(p$sigma2, var_floor))
                 trace <- data.frame(cost = tr$env$cost_v, loglik = cummax(tr$env$ll_v))
                 cost <- tr$env$cost
                 if (record_path && length(tr$env$ll_v) > 0) {
+                    # keep only the evaluations that improved on the best so far
                     idx <- which(diff(c(-Inf, cummax(tr$env$ll_v))) > 0)
                     path <- do.call(rbind, lapply(tr$env$theta_v[idx], function(th) {
                         m <- sort(unpack_par(th, K)$mu)
@@ -234,13 +224,13 @@ run_method <- function(
             list(
                 method = method, par = par,
                 loglik = gmm_loglikelihood(x, par$pi, par$mu, par$sigma2),
-                cost = cost, time_ms = 1000 * elapsed, converged = converged,
+                cost = cost, iterations = iterations,
+                converged = converged, restarted = restarted,
                 trace = trace, path = path
             )
         },
         error = function(e) failed_run(method)
     )
-    out
 }
 
 summarise_run <- function(r) {
@@ -250,7 +240,9 @@ summarise_run <- function(r) {
         loglik = r$loglik,
         pi1 = p$pi[1], mu1 = p$mu[1], mu2 = p$mu[2],
         sigma1 = sqrt(p$sigma2[1]), sigma2 = sqrt(p$sigma2[2]),
-        cost = r$cost, time_ms = r$time_ms, converged = r$converged
+        cost = r$cost, iterations = r$iterations, converged = r$converged,
+        restarted = r$restarted,
+        row.names = NULL
     )
 }
 
@@ -262,23 +254,26 @@ x <- faithful$waiting
 set.seed(42)
 init_km <- init_kmeans(x, 2)
 
-runs <- lapply(all_methods, function(m) run_method(m, x, init_km))
-names(runs) <- all_methods
+runs <- lapply(methods, function(m) run_method(m, x, init_km))
+names(runs) <- methods
 
 res_tab <- bind_rows(lapply(runs, summarise_run))
 ll_star <- max(res_tab$loglik, na.rm = TRUE)
 res_tab$`gap to best` <- ll_star - res_tab$loglik
 
 kable(
-    res_tab,
+    res_tab %>% select(-restarted),
     digits = 4,
-    caption = "Table 7. Final fit of each method from the same k-means start (Faithful waiting times). Cost = number of E-step-equivalent evaluations."
+    caption = paste(
+        "Table 7. Final fit of each method from the same k-means start (Faithful waiting times).",
+        "Cost = number of likelihood evaluations / E-steps (EM: 1 per iteration, mixtools ECM: 2 per iteration, plus 1 at the start)."
+    )
 )
 
 # ------------------------------------------------------------------
 # 2. Convergence race: log-likelihood gap vs computational cost
 # ------------------------------------------------------------------
-trace_df <- bind_rows(lapply(runs[traced_methods], function(r) {
+trace_df <- bind_rows(lapply(runs, function(r) {
     data.frame(method = r$method, r$trace)
 })) %>%
     mutate(gap = pmax(ll_star - loglik, 1e-12))
@@ -292,16 +287,15 @@ ggplot(trace_df, aes(cost, gap, colour = method)) +
     ) +
     scale_colour_manual(values = method_cols) +
     labs(
-        x = "Computational cost (likelihood / gradient evaluations, log scale)",
+        x = "Computational cost (likelihood evaluations, log scale)",
         y = "Log-likelihood gap to best (log scale)",
         colour = NULL,
         title = "Convergence race from the same starting point",
-        subtitle = "Lower-left is better. EM is monotone; general optimizers can jump around."
-    ) +
-    guides(colour = guide_legend(nrow = 2))
+        subtitle = "Lower-left is better. Both EM variants improve at every step;\nmixtools (ECM) pays 2 E-steps per iteration."
+    )
 
 # ------------------------------------------------------------------
-# 3. Do all methods agree? Estimates by method
+# 3. Do all methods agree? Estimates and cost by method
 # ------------------------------------------------------------------
 est_long <- res_tab %>%
     select(method, pi1, mu1, mu2, sigma1, sigma2) %>%
@@ -318,18 +312,16 @@ ggplot(est_long, aes(estimate, reorder(method, desc(method)), colour = method)) 
         subtitle = "If all points line up vertically, every method found the same maximum."
     )
 
-# Cost and time per method
-cost_df <- res_tab %>%
-    select(method, cost, time_ms) %>%
-    pivot_longer(c(cost, time_ms), names_to = "measure", values_to = "value") %>%
-    mutate(measure = recode(measure, cost = "Evaluations (E-step equivalents)", time_ms = "Elapsed time (ms)"))
-
-ggplot(cost_df, aes(reorder(method, value), value, fill = method)) +
+ggplot(res_tab, aes(reorder(method, cost), cost, fill = method)) +
     geom_col() +
+    geom_text(aes(label = cost), hjust = -0.2) +
     coord_flip() +
-    facet_wrap(~measure, scales = "free_x") +
+    expand_limits(y = max(res_tab$cost, na.rm = TRUE) * 1.15) +
     scale_fill_manual(values = method_cols, guide = "none") +
-    labs(x = NULL, y = NULL, title = "Cost to reach the optimum (one run)")
+    labs(
+        x = NULL, y = "Likelihood evaluations",
+        title = "Cost to reach the optimum (one run, k-means start)"
+    )
 
 # ------------------------------------------------------------------
 # 4. Optimizer paths on the likelihood surface (slice in the (mu1, mu2) plane)
@@ -350,14 +342,14 @@ surf$gap <- pmax(ll_fit - surf$ll, 0)
 # A deliberately poor start so that the paths are long enough to see
 init_poor <- list(pi = c(0.5, 0.5), mu = c(50, 60), sigma2 = c(8, 8)^2)
 
-path_df <- bind_rows(lapply(core_methods, function(m) {
+path_df <- bind_rows(lapply(methods, function(m) {
     r <- run_method(m, x, init_poor, record_path = TRUE)
     if (nrow(r$path) == 0) {
         return(NULL)
     }
     data.frame(method = m, step = seq_len(nrow(r$path)), r$path)
 })) %>%
-    mutate(method = factor(method, levels = core_methods))
+    mutate(method = factor(method, levels = methods))
 
 ggplot() +
     geom_contour_filled(
@@ -387,7 +379,7 @@ ggplot() +
     labs(
         x = expression(mu[1]), y = expression(mu[2]),
         title = "Paths of each optimizer on the likelihood surface",
-        subtitle = "Slice with pi and sigma fixed at the MLE. Star = start, circle = end. Only improving steps are drawn."
+        subtitle = "Slice with pi and sigma fixed at the MLE. Star = start, circle = end.\nOnly improving steps are drawn."
     )
 
 # ------------------------------------------------------------------
@@ -398,7 +390,7 @@ set.seed(2026)
 inits <- lapply(seq_len(R_starts), function(i) init_random(x, 2))
 
 rob <- bind_rows(lapply(seq_len(R_starts), function(i) {
-    bind_rows(lapply(traced_methods, function(m) {
+    bind_rows(lapply(methods, function(m) {
         s <- summarise_run(run_method(m, x, inits[[i]]))
         s$start <- i
         s
@@ -419,13 +411,20 @@ rob_sum <- rob %>%
         `success %` = 100 * mean(success),
         `converged %` = 100 * mean(converged),
         `median cost` = median(cost, na.rm = TRUE),
-        `median time (ms)` = median(time_ms, na.rm = TRUE),
+        `median iterations` = median(iterations, na.rm = TRUE),
         .groups = "drop"
     )
+n_restarted <- sum(rob$restarted, na.rm = TRUE)
 kable(
     rob_sum,
     digits = 1,
-    caption = "Table 8. Robustness over 100 random starts (success = final log-likelihood within 1e-3 of the best found by any method)."
+    caption = sprintf(
+        paste(
+            "Table 8. Robustness over %d random starts (success = final log-likelihood within 1e-3 of the best found by any method).",
+            "mixtools abandoned the given start (collapsing variance) and restarted from its own random values in %d runs."
+        ),
+        R_starts, n_restarted
+    )
 )
 
 ggplot(rob, aes(method, gap, colour = method)) +
@@ -455,98 +454,4 @@ ggplot(rob, aes(reorder(method, cost, median), cost, fill = method)) +
     scale_y_log10() +
     scale_fill_manual(values = method_cols, guide = "none") +
     coord_flip() +
-    labs(x = NULL, y = "Cost (evaluations, log scale)", title = "Cost from random starts")
-
-# ------------------------------------------------------------------
-# 6. Timing benchmark (30 repeated fits from the same start)
-# ------------------------------------------------------------------
-n_reps <- 30
-timing <- bind_rows(lapply(seq_len(n_reps), function(i) {
-    bind_rows(lapply(all_methods, function(m) {
-        r <- run_method(m, x, init_km)
-        data.frame(method = m, rep = i, time_ms = r$time_ms)
-    }))
-}))
-
-ggplot(timing, aes(reorder(method, time_ms, median), time_ms, fill = method)) +
-    geom_boxplot(outlier.alpha = 0.4) +
-    scale_y_log10() +
-    scale_fill_manual(values = method_cols, guide = "none") +
-    coord_flip() +
-    labs(
-        x = NULL, y = "Elapsed time per fit (ms, log scale)",
-        title = "Speed benchmark (30 repetitions, Faithful data)"
-    )
-
-# ------------------------------------------------------------------
-# 7. Our EM vs library EM implementations on simulated data
-#    (same starting values for mixtools; mclust uses its own start)
-# ------------------------------------------------------------------
-if (length(lib_methods) > 0) {
-    lib_cmp <- bind_rows(lapply(c(0.5, 1.5, 3, 5), function(d) {
-        bind_rows(lapply(1:30, function(r) {
-            set.seed(42 + r)
-            z <- rbinom(500, 1, 0.5)
-            xs <- rnorm(500, mean = d * z)
-            init <- init_kmeans(xs, 2)
-            ours <- run_method("EM (ours)", xs, init)
-            bind_rows(lapply(lib_methods, function(m) {
-                theirs <- run_method(m, xs, init)
-                data.frame(
-                    delta = d, rep = r, library = m,
-                    ll_diff = ours$loglik - theirs$loglik,
-                    par_diff = max(abs(c(
-                        ours$par$pi - theirs$par$pi,
-                        ours$par$mu - theirs$par$mu,
-                        sqrt(ours$par$sigma2) - sqrt(theirs$par$sigma2)
-                    ))),
-                    iter_ours = ours$cost,
-                    iter_lib = theirs$cost
-                )
-            }))
-        }))
-    }))
-    set.seed(42)
-
-    print(
-        ggplot(lib_cmp, aes(factor(delta), ll_diff, fill = library)) +
-            geom_hline(yintercept = 0, linetype = 2) +
-            geom_boxplot(outlier.alpha = 0.4) +
-            scale_fill_manual(values = method_cols) +
-            labs(
-                x = expression(Delta * mu), y = "loglik(ours) - loglik(library)", fill = NULL,
-                title = "Our EM vs library implementations: log-likelihood difference",
-                subtitle = "Positive = ours found a higher likelihood. Zero = same optimum."
-            )
-    )
-
-    print(
-        ggplot(lib_cmp, aes(factor(delta), par_diff + 1e-16, fill = library)) +
-            geom_boxplot(outlier.alpha = 0.4) +
-            scale_y_log10() +
-            scale_fill_manual(values = method_cols) +
-            labs(
-                x = expression(Delta * mu), y = "Max abs. parameter difference (log scale)", fill = NULL,
-                title = "Our EM vs library implementations: parameter agreement"
-            )
-    )
-
-    if (has_mixtools) {
-        print(
-            ggplot(
-                lib_cmp %>% filter(library == "mixtools::normalmixEM"),
-                aes(iter_lib, iter_ours, colour = factor(delta))
-            ) +
-                geom_abline(slope = 1, intercept = 0, linetype = 2) +
-                geom_point(size = 2, alpha = 0.7) +
-                scale_x_log10() +
-                scale_y_log10() +
-                scale_colour_brewer(palette = "Dark2") +
-                labs(
-                    x = "mixtools iterations", y = "Our EM iterations", colour = expression(Delta * mu),
-                    title = "Iterations to converge: ours vs mixtools",
-                    subtitle = "Stopping rules differ (relative vs absolute log-likelihood change), so exact equality is not expected."
-                )
-        )
-    }
-}
+    labs(x = NULL, y = "Cost (likelihood evaluations, log scale)", title = "Cost from random starts")
