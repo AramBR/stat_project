@@ -1,0 +1,519 @@
+=====================================================================
+  THE EM ALGORITHM FOR GAUSSIAN MIXTURES - PRESENTATION GUIDE
+  (order of the talk, every figure and table, and what to say)
+=====================================================================
+
+All numbers below come from a full run of the project files
+(R/core.R, R/helpers.R and the 7 scripts). Figure and table numbers
+refer to the order in which each script draws them.
+
+---------------------------------------------------------------------
+BEFORE YOU START: one file needs replacing
+---------------------------------------------------------------------
+The simulation_ci.R in your folder is an older version. It passes
+"n_restarts = n_restarts_ci" to gmm_ci(), but gmm_ci() in helpers.R
+no longer has that argument, so the script stops with
+    Error: unused argument (n_restarts = 0)
+Use the simulation_ci.R sent earlier in the conversation (it has no
+n_restarts and no interval-width plot). All results below come from
+that version.
+
+---------------------------------------------------------------------
+THE SCRIPTS AND WHAT THEY PRODUCE
+---------------------------------------------------------------------
+  R/core.R             the EM algorithm itself (E-step, M-step, em_gmm)
+  R/helpers.R          starting values, multi-start, AIC/BIC, bootstrap,
+                       convergence-rate tools (no output on its own)
+
+  Script               Figures  Tables      Run time (approx.)
+  exp.R                   3     1, 2, 3     5 s
+  EM_step_by_step.R       2     -           5 s
+  model_selection.R       5     13, 14      9 min
+  simulation_ci.R         4     9, 10       45 min   (most expensive)
+  convergence.R           5     11, 12      7 min
+  simulation.R            4     4, 5        5 min
+  compare.R               7     7, 8        1 min
+  ---------------------------------------------------------------
+  Total                  30 figures, 14 tables
+
+The table numbers come from the order the project was originally
+written in, so they are NOT in presentation order. You may want to
+renumber them in the slides.
+
+The talk below uses about 16 figures in the main part and puts the
+rest in a backup/appendix section. Figures marked [MAIN] carry the
+story; [BACKUP] figures support a point if someone asks.
+
+
+=====================================================================
+PART 1. THE DATA AND THE PROBLEM
+=====================================================================
+
+Slide 1.1  The data
+  Script: exp.R, Figure 1  [MAIN]
+  "Old Faithful waiting times": histogram + smooth density + rug.
+  Table 1 (descriptive statistics) can sit next to it.
+
+  What to say:
+  - 272 waiting times between eruptions, 43 to 96 minutes,
+    mean 70.9, sd 13.6.
+  - The histogram has TWO humps (short waits around 55 min, long
+    waits around 80). One normal distribution cannot describe this.
+  - Idea: each eruption is of one of two hidden "types", each type
+    has its own normal distribution. We do not observe the type.
+    That is a 2-component Gaussian mixture:
+        f(x) = pi1 * N(mu1, sigma1^2) + pi2 * N(mu2, sigma2^2)
+  - Problem: if we knew the types, fitting would be trivial (mean and
+    variance of each group). We do not know them -> this is exactly
+    the "missing data" situation EM was built for.
+
+
+=====================================================================
+PART 2. HOW EM WORKS
+=====================================================================
+
+Slide 2.1  The algorithm in one picture
+  Script: EM_step_by_step.R, Figure 1  [MAIN]
+  "EM, step by step": six panels, the fit at iterations
+  0, 16, 17, 19, 25 and 41 (converged).
+
+  What to say (explain the two steps with this picture):
+  - E-step: for every point, compute the probability that it belongs
+    to each component, given the current fit. These are the dot
+    colours: green = surely short wait, orange = surely long wait,
+    grey = unsure.
+  - M-step: refit each component as a WEIGHTED normal: weighted mean,
+    weighted variance, and the total weight gives the mixing
+    proportion.
+  - Repeat until nothing changes.
+  - Starting point: two almost identical components in the middle
+    (means 70 and 72). In iteration 0 all dots are grey: EM does not
+    know which point belongs where. By iteration 41 the two groups are
+    cleanly separated.
+
+Slide 2.2  The log-likelihood never goes down
+  Script: EM_step_by_step.R, Figure 2  [MAIN]
+
+  What to say:
+  - The key theoretical guarantee of EM: every iteration increases
+    (or keeps) the log-likelihood. The curve is never decreasing.
+  - Interesting shape: for ~15 iterations almost nothing happens
+    (log-likelihood stuck near -1095), then the two components split
+    within about 10 iterations, then it flattens out at -1034.0.
+    The flat start is because the starting point is close to a
+    "saddle point" (see slide 4.1).
+
+
+=====================================================================
+PART 3. THE RESULT ON OLD FAITHFUL
+=====================================================================
+
+Slide 3.1  The fitted mixture
+  Script: exp.R, Figure 2  [MAIN]  + Table 2
+  Histogram, the two fitted components (dashed), their sum (solid),
+  each point coloured by its most likely component.
+
+  What to say:
+  - Starting from k-means, EM converged in 12 iterations,
+    log-likelihood = -1034.002.
+  - Component 1 (short waits): pi = 0.361, mu = 54.6, sigma = 5.87
+    Component 2 (long waits):  pi = 0.639, mu = 80.1, sigma = 5.87
+  - About 36% of eruptions are followed by a short wait (~55 min),
+    64% by a long wait (~80 min).
+
+Slide 3.2  Is K = 2 the right number of components?
+  Script: model_selection.R, Figure 1  [MAIN]  + Table 13
+  "Choosing K for the Faithful data": AIC and BIC for K = 1..6,
+  the minimum is circled.
+
+  What to say:
+  - More components always fit at least as well, so the
+    log-likelihood alone would always pick the biggest K.
+  - AIC and BIC add a penalty per parameter (3K - 1 parameters):
+        AIC = -2 loglik + 2p,      BIC = -2 loglik + log(n) p
+  - Both choose K = 2.
+    K = 1 is far worse (AIC worse by 117, BIC by 106).
+    AIC: K = 3 is a close second (only 1.3 worse).
+    BIC: rejects K = 3 clearly (12 worse) because its penalty is
+    larger (log 272 = 5.6 per parameter vs 2 for AIC).
+
+  Script: model_selection.R, Figure 2  [BACKUP]
+  "The two parts of AIC and BIC": the fit (-2 loglik) drops sharply
+  from K = 1 to 2 and then is almost flat; the penalty keeps rising.
+  Good if you want to explain WHY the curves in 3.2 turn back up.
+
+  Script: model_selection.R, Figure 3  [MAIN or BACKUP]
+  "Fitted mixtures with 1 to 4 components": K = 1 misses the two
+  modes; K = 3 and 4 look almost the same as K = 2.
+  Very intuitive picture - use it if you have time.
+
+Slide 3.3  How precise are the estimates?
+  Script: simulation_ci.R, Figure 1  [MAIN]  + Table 9
+  "Faithful: parameter estimates with bootstrap intervals".
+
+  What to say:
+  - Bootstrap: resample the 272 points with replacement 500 times,
+    refit EM every time, see how much the estimates move.
+    SE = sd of the 500 estimates; 95% CI = 2.5% and 97.5% quantiles.
+  - Results (estimate, 95% CI):
+        pi1     0.361   [0.303, 0.432]
+        mu1     54.6    [53.0, 56.0]
+        mu2     80.1    [79.0, 81.1]
+        sigma1  5.87    [4.84, 6.80]
+        sigma2  5.87    [5.14, 6.82]
+  - The means are known to about +-1 minute; the share of short
+    waits is between about 30% and 43%.
+  - (Part 5.4 checks whether these bootstrap intervals can be
+    trusted - on Faithful the components are well separated, which
+    is the case where they work well.)
+
+
+=====================================================================
+PART 4. PROPERTIES OF THE ALGORITHM (on the real data)
+=====================================================================
+
+Slide 4.1  Starting values matter
+  Script: exp.R, Figure 3  [MAIN]  + Table 3
+  Log-likelihood trajectories from six different starting points.
+
+  What to say:
+  - Four starts (good guess, k-means, wide & far, close means) all
+    reach the SAME maximum, -1034.002, in 5 to 41 iterations.
+  - S6 "saddle": both components start identical (same mean, weight,
+    variance). Then both get exactly the same responsibilities, so they
+    stay identical forever. EM "converges" after 2 iterations to
+    -1095.3, which is just the one-normal fit. A saddle point is not a
+    maximum, but EM cannot leave it.
+  - S5 "unbalanced": one component with 2% weight and a tiny variance
+    around x = 96. Its variance collapses towards 0 - the likelihood
+    of a mixture can go to +infinity when one component sits on a
+    single point. Our code detects this ("degenerate") and stops.
+  - Lesson: EM only finds a LOCAL maximum (or gets stuck). In
+    practice: run it from several starting points and keep the best
+    (em_best does this: k-means start + 10 random starts).
+  - Every run is monotone (Monotone = TRUE in Table 3).
+
+Slide 4.2  EM converges linearly
+  Script: convergence.R, Figure 1  [MAIN]  + Table 11
+  "EM converges linearly": distance to the optimal parameters vs
+  iteration, log scale.
+
+  What to say:
+  - Near the optimum, each iteration shrinks the remaining error by
+    the same factor r:  error(t+1) ~ r * error(t).
+    On a log scale that is a straight line - which is exactly what we
+    see (dotted lines = slope implied by r).
+  - On Faithful r = 0.658 from every start: each iteration removes
+    about a third of the error, ~5.5 iterations per extra correct
+    digit.
+  - The lines are parallel: the speed near the end does not depend
+    on where you started, only on the data (the optimum).
+  - Note: Table 11 shows more iterations than Table 3 (e.g. k-means
+    28 vs 12) because here the tolerance is much stricter (1e-14
+    instead of 1e-8), to see the asymptotic behaviour.
+
+  Script: convergence.R, Figure 2  [BACKUP]
+  "Ratio of successive parameter steps": each step divided by the
+  previous step. After some wiggles, every start settles at the same
+  value 0.658 = r. Shows how r is measured.
+
+
+=====================================================================
+PART 5. SIMULATION STUDIES (when does EM work well?)
+=====================================================================
+
+Common set-up for all simulations (say this once):
+  - Data generated from a KNOWN mixture:
+        0.5 * N(0, 1) + 0.5 * N(delta, 1)
+  - delta = distance between the two means. Both sds are 1, so
+    delta = 0.5 means the components overlap almost completely,
+    delta = 5 means they are clearly separate.
+  - n = 500 points per dataset, many datasets per delta.
+  - Because we know the truth, we can check how close EM gets.
+
+Slide 5.1  Parameter recovery
+  Script: simulation.R, Figure 1  [MAIN]  + Table 4
+  "EM estimation error by component separation": estimate minus
+  truth, boxplots per parameter and delta (R = 100 datasets).
+
+  What to say:
+  - delta = 3 and 5: errors are small and centred at 0 (bias ~0,
+    RMSE of the means 0.07 - 0.14).
+  - delta = 0.5 and 1.5: errors are huge (RMSE of mu2 = 1.05 at
+    delta = 0.5, i.e. bigger than the separation itself). When the
+    components overlap, the data contain very little information to
+    tell them apart.
+  - % non-monotone = 0 in every case: the log-likelihood never
+    decreased in any of the 400 runs.
+
+Slide 5.2  Classification
+  Script: simulation.R, Figure 2  [MAIN]  + Table 5
+  "EM classification error vs Bayes-optimal error".
+
+  What to say:
+  - Bayes error = the error of the best possible classifier that
+    KNOWS the true parameters. Nothing can do better.
+  - delta = 3 and 5: EM is practically optimal
+    (7.4% vs 6.7%, 0.7% vs 0.6%).
+  - delta = 1.5: EM 33.8% vs best possible 22.7%.
+    delta = 0.5: 45.6% vs 40.1% (both close to coin-flipping).
+  - Two extra findings from Table 5 that have no figure:
+    * label swaps: at delta = 0.5, 18% of runs call the true first
+      component "component 2" (12% at 1.5, 0% at 3 and 5).
+    * mean ll gap ~ 2.9 at EVERY delta: the fitted model always has a
+      HIGHER likelihood on the data than the true parameters. The
+      MLE adapts to the noise in the sample (overfitting). Theory
+      predicts roughly 2.5 for 5 free parameters (half a chi-square
+      with 5 degrees of freedom), so ~2.9 is in line with it.
+
+Slide 5.3  Speed depends on separation
+  Script: convergence.R, Figure 3  [MAIN]  + Table 12
+  "EM slows down when components overlap": rate r per dataset.
+
+  What to say:
+  - delta = 5: r = 0.43, ~15 iterations.
+    delta = 3: r = 0.93, ~150 iterations.
+    delta <= 2: r between 0.99 and 0.999 - hundreds to thousands of
+    iterations per correct digit.
+  - At delta = 0.5, 57% of runs had not converged after 5000
+    iterations (Table 12, "% not converged").
+
+  Script: convergence.R, Figure 4  [MAIN]
+  "More label uncertainty = slower EM": rate vs average uncertainty
+  of the class labels.
+
+  What to say (this is the explanation):
+  - When the E-step can tell which component each point belongs to
+    (uncertainty near 0), each iteration makes big progress.
+  - When points could belong to either component, each M-step learns
+    little, and r goes to 1. Formally: r = the fraction of missing
+    information.
+
+  Script: convergence.R, Figure 5  [BACKUP]
+  "Iterations needed": boxplots of the number of iterations.
+  CAUTION: the runs that hit the 5000 limit are cut off at 5000, so
+  for delta <= 1.5 the real numbers are even larger than shown.
+
+  Script: simulation.R, Figure 3  [BACKUP]
+  "Convergence speed by component separation": same message with the
+  normal tolerance (median 968 iterations at delta = 0.5, 6 at 5).
+
+  Script: simulation.R, Figure 4  [BACKUP]
+  "Convergence status by component separation": share of runs that
+  converged / degenerated / hit the limit. Almost all converge; 4% of
+  runs at delta = 0.5 and 1% at 1.5 did not (mostly a collapsing
+  component, "degenerate").
+
+Slide 5.4  Can AIC/BIC find the right number of components?
+  Script: model_selection.R, Figure 4  [MAIN]  + Table 14
+  "Can AIC and BIC find the two components?": which K is chosen
+  (true K = 2, green), R = 50 datasets per delta.
+
+  Script: model_selection.R, Figure 5  [MAIN or BACKUP]
+  "BIC is cautious, AIC is generous": % correct per criterion.
+
+  What to say:
+  - BIC chooses K = 1 in almost every dataset until delta = 2
+    (correct only 0%, 0%, 2%, 12%), then 100% at delta = 3.
+  - AIC finds K = 2 earlier (60% at delta = 2, 94% at 3) but picks
+    too many components (K >= 3) in up to 30% of datasets.
+  - Message: when two normals overlap strongly, their mixture really
+    does look like ONE normal, so no criterion can detect the second
+    component. This links to slide 5.1: if you cannot detect the
+    component, you also cannot estimate it well.
+
+Slide 5.5  Can the bootstrap intervals be trusted?
+  Script: simulation_ci.R, Figure 2  [MAIN]  + Table 10
+  "Do the bootstrap intervals cover the truth?": share of 95%
+  intervals that contain the true value (R = 50 datasets, B = 100).
+
+  What to say:
+  - A 95% interval should contain the truth in 95% of datasets.
+    The grey band is the noise expected from only 50 datasets
+    (about +-6%).
+  - delta = 3 and 5: coverage 86% - 100%, mostly inside the band.
+    The bootstrap works.
+  - delta = 0.5 and 1.5: coverage only 65% - 80%. The intervals are
+    too narrow.
+
+  Script: simulation_ci.R, Figure 3  [MAIN]
+  "Size of bootstrap standard errors": bootstrap SE divided by the
+  real variability of the estimates (ratio 1 = correct).
+
+  What to say:
+  - delta = 0.5 and 1.5: ratio 0.37 - 0.77, i.e. the bootstrap
+    underestimates the uncertainty by up to a factor ~2.5.
+  - delta = 3 and 5: ratio around 1 (0.8 - 1.2; the 1.49 for mu2 at
+    delta = 5 is Monte Carlo noise from 50 datasets).
+  - Likely reasons when components overlap:
+    * every bootstrap refit starts at the original estimate, so it
+      tends to stay near it;
+    * 17 - 23% of the bootstrap refits stop at the iteration limit
+      (1000) because EM is so slow there (slide 5.3) - they stop
+      before moving far from the start;
+    * the estimates are far from normally distributed (slide 5.1).
+  - Honest conclusion: for well-separated components the bootstrap
+    CIs are reliable; with strong overlap they are too optimistic.
+
+  Script: simulation_ci.R, Figure 4  [BACKUP]
+  "Every interval for Delta mu = 1.5": all 50 intervals sorted by the
+  estimate; red = misses the truth. Makes the coverage idea concrete.
+
+
+=====================================================================
+PART 6. COMPARISON WITH OTHER METHODS
+=====================================================================
+
+The three methods (say this once):
+  - EM (ours): the algorithm of this project.
+  - mixtools::normalmixEM: the standard published EM for mixtures in
+    R. Important discovery: with its default settings it does NOT run
+    plain EM but ECM (Expectation / Conditional Maximization): in each
+    iteration it updates weights and means, then does a SECOND E-step,
+    then updates the variances. So each iteration costs two E-steps.
+    (Verified by re-coding these steps by hand: identical results.)
+  - BFGS: a general-purpose optimizer (R's optim). It knows nothing
+    about mixtures; it just maximizes the log-likelihood function.
+  Cost is measured in likelihood evaluations / E-steps, which is fair
+  across methods (each costs about the same).
+
+Slide 6.1  Same start, same answer, different price
+  Script: compare.R, Figure 1  [MAIN]  + Table 7
+  "Convergence race from the same starting point": distance to the
+  best log-likelihood vs cost (both axes log scale).
+
+  What to say:
+  - From the k-means start all three reach the same maximum
+    (-1034.002, same parameters to 3-4 decimals).
+  - Cost: EM 18, mixtools 41, BFGS 125 evaluations.
+  - Both EM variants improve at every step. BFGS stays flat for a
+    long time and then drops suddenly.
+
+  Script: compare.R, Figure 3  [BACKUP]
+  "Cost to reach the optimum": bar chart of 18 / 41 / 125 (same
+  numbers as Table 7 - use it instead of the table if you prefer).
+
+  Script: compare.R, Figure 2  [SKIP or appendix]
+  "Parameter estimates by method": all methods agree so closely that
+  the x-axis labels overlap and are unreadable. Table 7 says the same
+  thing more clearly.
+
+Slide 6.2  The paths on the likelihood surface
+  Script: compare.R, Figure 4  [MAIN]
+  "Paths of each optimizer on the likelihood surface": the (mu1, mu2)
+  plane with the log-likelihood as colours, start = star,
+  end = circle, from a deliberately poor start (means 50 and 60).
+
+  What to say:
+  - Two bright peaks = the same solution with the labels swapped
+    (mu1 = 55, mu2 = 80 or the reverse).
+  - EM and mixtools walk smoothly up to the peak, almost the same
+    path.
+  - BFGS stops halfway (mu1 ~ 52, mu2 ~ 71): from this start it gets
+    stuck and never reaches the peak.
+
+Slide 6.3  Robustness from 100 random starts
+  Script: compare.R, Figure 6  [MAIN]  + Table 8
+  "Success rate from random starts".
+
+  What to say:
+  - Same 100 random starting points for every method.
+  - Reached the global maximum: EM 100%, mixtools 100%, BFGS 66%.
+  - Median cost: EM 35, mixtools 67, BFGS 280.
+  - EM and mixtools need almost the same number of iterations
+    (34 vs 33), but mixtools pays 2 E-steps per iteration, so it costs
+    about twice as much. Its extra E-step does not speed it up here.
+  - mixtools never had to abandon a start because of a collapsing
+    variance (0 restarts).
+
+  Script: compare.R, Figure 5  [BACKUP]
+  "Where does each method end up from 100 random starts?": final gap
+  to the best log-likelihood per run. EM and mixtools are all at the
+  bottom; BFGS is spread out, a third of its runs end far away.
+
+  Script: compare.R, Figure 7  [BACKUP]
+  "Cost from random starts": boxplots of the cost per run (same
+  ranking: EM < mixtools < BFGS).
+
+
+=====================================================================
+PART 7. CONCLUSIONS (final slide)
+=====================================================================
+
+  1. EM fits a 2-component mixture to Old Faithful: 36% short waits
+     (~55 min) and 64% long waits (~80 min). AIC and BIC both
+     confirm 2 components.
+  2. The log-likelihood never decreases - confirmed in every run of
+     every experiment.
+  3. EM only finds a local maximum and can get stuck at a saddle point
+     or collapse a component: use several starting points.
+  4. EM converges linearly. It is fast when the components are well
+     separated (r = 0.43) and extremely slow when they overlap
+     (r -> 1), because then the labels are uncertain.
+  5. With well-separated components EM estimates are accurate and
+     classification is almost optimal. With strong overlap the
+     estimates are poor, the second component cannot be detected by
+     AIC/BIC, and the bootstrap CIs are too narrow.
+  6. Compared with other methods: EM is the cheapest and most
+     reliable here. mixtools (actually ECM) gives the same answer at
+     twice the cost; BFGS is ~8 times more expensive and misses the
+     global maximum in a third of the runs.
+
+  Limitations (one line each, good for questions):
+  - Only one-dimensional data and normal components.
+  - Simulations only use equal weights (0.5/0.5) and equal sds;
+    unequal ones were not tested.
+  - The bootstrap uses a warm start and an iteration limit, which
+    likely contributes to the low coverage with overlap.
+
+
+=====================================================================
+QUICK LIST: EVERY FIGURE IN PRESENTATION ORDER
+=====================================================================
+  #   Slide  Script / figure                 Title                                       Use
+  1   1.1    exp.R  Fig 1                    Old Faithful waiting times                  MAIN
+  2   2.1    EM_step_by_step.R Fig 1         EM, step by step                            MAIN
+  3   2.2    EM_step_by_step.R Fig 2         The log-likelihood never goes down          MAIN
+  4   3.1    exp.R  Fig 2                    (fitted mixture, no title)                  MAIN
+  5   3.2    model_selection.R Fig 1         Choosing K for the Faithful data            MAIN
+  6   3.2    model_selection.R Fig 2         The two parts of AIC and BIC                BACKUP
+  7   3.2    model_selection.R Fig 3         Fitted mixtures with 1 to 4 components      MAIN/BACKUP
+  8   3.3    simulation_ci.R   Fig 1         Faithful: estimates with bootstrap CIs      MAIN
+  9   4.1    exp.R  Fig 3                    (log-likelihood from six starts)            MAIN
+  10  4.2    convergence.R     Fig 1         EM converges linearly                       MAIN
+  11  4.2    convergence.R     Fig 2         Ratio of successive parameter steps         BACKUP
+  12  5.1    simulation.R      Fig 1         EM estimation error by separation           MAIN
+  13  5.2    simulation.R      Fig 2         EM classification error vs Bayes-optimal    MAIN
+  14  5.3    convergence.R     Fig 3         EM slows down when components overlap       MAIN
+  15  5.3    convergence.R     Fig 4         More label uncertainty = slower EM          MAIN
+  16  5.3    convergence.R     Fig 5         Iterations needed (tol 1e-14)               BACKUP
+  17  5.3    simulation.R      Fig 3         Convergence speed by separation             BACKUP
+  18  5.3    simulation.R      Fig 4         Convergence status by separation            BACKUP
+  19  5.4    model_selection.R Fig 4         Can AIC and BIC find the two components?    MAIN
+  20  5.4    model_selection.R Fig 5         BIC is cautious, AIC is generous            MAIN/BACKUP
+  21  5.5    simulation_ci.R   Fig 2         Do the bootstrap intervals cover the truth? MAIN
+  22  5.5    simulation_ci.R   Fig 3         Size of bootstrap standard errors           MAIN
+  23  5.5    simulation_ci.R   Fig 4         Every interval for Delta mu = 1.5           BACKUP
+  24  6.1    compare.R         Fig 1         Convergence race from the same start        MAIN
+  25  6.1    compare.R         Fig 3         Cost to reach the optimum                   BACKUP
+  26  6.1    compare.R         Fig 2         Parameter estimates by method               SKIP
+  27  6.2    compare.R         Fig 4         Paths on the likelihood surface             MAIN
+  28  6.3    compare.R         Fig 6         Success rate from random starts             MAIN
+  29  6.3    compare.R         Fig 5         Where does each method end up?              BACKUP
+  30  6.3    compare.R         Fig 7         Cost from random starts                     BACKUP
+
+QUICK LIST: EVERY TABLE IN PRESENTATION ORDER
+  Slide  Table  Script               Content
+  1.1     1     exp.R                Descriptive statistics
+  3.1     2     exp.R                EM estimates on Faithful
+  3.2    13     model_selection.R    AIC / BIC for K = 1..6
+  3.3     9     simulation_ci.R      Bootstrap SEs and CIs (Faithful)
+  4.1     3     exp.R                Results from six starting points
+  4.2    11     convergence.R        Convergence rate on Faithful
+  5.1     4     simulation.R         Bias, RMSE, iterations, monotonicity
+  5.2     5     simulation.R         Misclassification vs Bayes error
+  5.3    12     convergence.R        Convergence rate by separation
+  5.4    14     model_selection.R    Which K is chosen, by separation
+  5.5    10     simulation_ci.R      Bootstrap coverage and SE ratio
+  6.1     7     compare.R            Methods from the same start
+  6.3     8     compare.R            Methods from 100 random starts
