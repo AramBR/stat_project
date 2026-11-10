@@ -25,7 +25,7 @@ kable(
 )
 
 ggplot(ci_f %>% filter(parameter != "pi2"), aes(estimate, parameter)) +
-    geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2) +
+    geom_errorbar(aes(xmin = lower, xmax = upper), width = 0.2, orientation = "y") +
     geom_point(size = 3, colour = "#1b9e77") +
     facet_wrap(~parameter, scales = "free", ncol = 1) +
     labs(
@@ -44,15 +44,27 @@ B_ci <- 100 # bootstrap resamples per replicate
 n_ci <- 500
 true_pi <- 0.5
 level <- 0.95
+# Extra random starts per bootstrap resample. 0 = warm start from the
+# full-data fit only (fast, but may understate variability when components
+# overlap). Each extra start multiplies the run time.
+n_restarts_ci <- 0
 
-# total EM fits = length(deltas) * R_ci * B_ci  -> lower R_ci / B_ci while testing
+# total EM fits = length(deltas) * R_ci * B_ci * (1 + n_restarts_ci)
+#   -> lower R_ci / B_ci while testing
 
 run_ci_rep <- function(d, r) {
     set.seed(42 + r)
     z <- rbinom(n_ci, 1, 1 - true_pi)
     xs <- rnorm(n_ci, mean = d * z)
     f <- em_gmm(xs, init_kmeans(xs, 2), max_iter = 5000)
-    ci <- gmm_ci(xs, f, B = B_ci, level = level, max_iter = 1000)
+    # A degenerate fit is not an estimate; skip the replicate (counted below)
+    if (f$status == "degenerate") {
+        return(NULL)
+    }
+    ci <- gmm_ci(
+        xs, f,
+        B = B_ci, level = level, n_restarts = n_restarts_ci, max_iter = 1000
+    )
     truth <- c(pi1 = true_pi, pi2 = 1 - true_pi, mu1 = 0, mu2 = d, sigma1 = 1, sigma2 = 1)
     ci$truth <- unname(truth[ci$parameter])
     ci$delta <- d
@@ -79,6 +91,9 @@ set.seed(42)
 ci_tab <- ci_sim %>%
     group_by(`Delta mu` = delta, parameter) %>%
     summarise(
+        R = n(), # replicates used (degenerate full-data fits are skipped)
+        `boot failed %` = 100 * mean(n_failed) / B_ci,
+        `boot not conv. %` = 100 * mean(n_not_converged) / B_ci,
         `coverage %` = 100 * mean(covered),
         `mean CI width` = mean(upper - lower),
         `mean boot SE` = mean(se),
@@ -90,8 +105,8 @@ kable(
     ci_tab,
     digits = 3,
     caption = sprintf(
-        "Table 10. Bootstrap CI performance (R = %d replicates, B = %d, n = %d, nominal level %.0f%%).",
-        R_ci, B_ci, n_ci, 100 * level
+        "Table 10. Bootstrap CI performance (up to %d replicates, B = %d, n = %d, %d extra starts per resample, nominal level %.0f%%).",
+        R_ci, B_ci, n_ci, n_restarts_ci, 100 * level
     )
 )
 
@@ -151,7 +166,10 @@ cat_df <- ci_sim %>%
 
 ggplot(cat_df, aes(y = order)) +
     geom_vline(aes(xintercept = truth), linetype = 2) +
-    geom_errorbarh(aes(xmin = lower, xmax = upper, colour = covered), height = 0, linewidth = 0.6) +
+    geom_errorbar(
+        aes(xmin = lower, xmax = upper, colour = covered),
+        width = 0, linewidth = 0.6, orientation = "y"
+    ) +
     geom_point(aes(x = estimate, colour = covered), size = 1.2) +
     facet_wrap(~parameter, scales = "free_x", nrow = 1) +
     scale_colour_manual(values = c(`TRUE` = "grey55", `FALSE` = "#d7191c"), name = "Covers truth") +

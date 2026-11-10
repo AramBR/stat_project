@@ -2,7 +2,7 @@
 # Convergence rate analysis of EM
 #
 # Key idea: EM converges linearly. Near the optimum, every iteration shrinks
-# the remaining error by (roughly) the same factor r:
+# the remaining error in the parameters by (roughly) the same factor r:
 #     error_{t+1} ~ r * error_t        (0 < r < 1)
 # so on a log scale the error is a straight line with slope log(r).
 #   r = 0.5  -> ~3.3 iterations per extra correct digit
@@ -36,23 +36,32 @@ starts <- list(
 traces <- lapply(starts, function(s) em_trace(x, s, max_iter = 3000))
 rates <- lapply(traces, em_rate)
 
-# Common reference optimum = best final log-likelihood among the runs
-ll_star <- max(sapply(traces, function(tr) tr[nrow(tr), "loglik"]))
+# Common reference optimum theta* = final parameters of the run with the
+# highest final log-likelihood
+final_ll <- vapply(traces, function(tr) unname(tr[nrow(tr), "loglik"]), numeric(1))
+best_tr <- traces[[which.max(final_ll)]]
+theta_star <- best_tr[nrow(best_tr), -(1:2)]
 
+# Parameter error at every iteration: distance between theta_t and theta*
 trace_df <- bind_rows(lapply(names(traces), function(nm) {
-    tr <- as.data.frame(traces[[nm]])
-    data.frame(start = nm, iter = tr$iter, loglik = tr$loglik, gap = ll_star - tr$loglik)
+    tr <- traces[[nm]]
+    P <- tr[, -(1:2), drop = FALSE]
+    err <- sqrt(rowSums(sweep(P, 2, theta_star)^2))
+    data.frame(start = nm, iter = tr[, "iter"], error = err)
 }))
 
 # Summary table: iterations, estimated rate, iterations per extra digit
 rate_tab <- bind_rows(lapply(names(traces), function(nm) {
+    r <- rates[[nm]]$rate
     data.frame(
         Start = nm,
         Iterations = nrow(traces[[nm]]) - 1,
-        `Rate r` = rates[[nm]]$rate,
-        `Iterations per digit` = -1 / log10(rates[[nm]]$rate),
-        `Final loglik` = traces[[nm]][nrow(traces[[nm]]), "loglik"],
-        check.names = FALSE
+        Status = attr(traces[[nm]], "status"),
+        `Rate r` = r,
+        `Iterations per digit` = -1 / log10(r),
+        `Final loglik` = unname(final_ll[nm]),
+        check.names = FALSE,
+        row.names = NULL
     )
 }))
 kable(
@@ -64,7 +73,7 @@ kable(
 # Straight-line asymptotes implied by the estimated rates
 asym_df <- bind_rows(lapply(names(traces), function(nm) {
     r <- rates[[nm]]$rate
-    d <- trace_df %>% filter(start == nm, gap > 1e-8)
+    d <- trace_df %>% filter(start == nm, error > 1e-6)
     if (is.na(r) || nrow(d) < 5) {
         return(NULL)
     }
@@ -72,64 +81,75 @@ asym_df <- bind_rows(lapply(names(traces), function(nm) {
     data.frame(
         start = nm,
         iter = d$iter,
-        gap = anchor$gap * r^(d$iter - anchor$iter)
+        error = anchor$error * r^(d$iter - anchor$iter)
     )
 }))
 
 # 1a. Error vs iteration (log y): straight lines = linear convergence
-ggplot(trace_df %>% filter(gap > 1e-9), aes(iter, gap, colour = start)) +
+# (runs that stopped immediately, like the degenerate "unbalanced" start,
+# have no line to draw and are left out)
+plot_df <- trace_df %>%
+    group_by(start) %>%
+    filter(n() > 1, error > 1e-7) %>%
+    ungroup()
+ggplot(plot_df, aes(iter, error, colour = start)) +
     geom_line(linewidth = 1) +
     geom_line(
-        data = asym_df, aes(iter, gap, group = start),
+        data = asym_df, aes(iter, error, group = start),
         colour = "black", linetype = 3, linewidth = 0.6
     ) +
     scale_y_log10(
-        breaks = 10^seq(-9, 3, by = 3),
+        breaks = 10^seq(-6, 3, by = 3),
         labels = scales::trans_format("log10", scales::math_format(10^.x))
     ) +
     scale_colour_brewer(palette = "Dark2") +
     labs(
-        x = "Iteration", y = "Log-likelihood gap to the optimum (log scale)", colour = "Start",
+        x = "Iteration", y = "Distance to the optimal parameters (log scale)", colour = "Start",
         title = "EM converges linearly",
-        subtitle = "Straight lines on a log scale. Dotted = asymptote implied by the estimated rate r."
+        subtitle = "Straight lines on a log scale. Dotted = slope implied by the estimated rate r."
     )
 
-# 1b. Ratio of successive increments settles at the rate
+# 1b. Ratio of successive parameter steps settles at the rate
 ratio_df <- bind_rows(lapply(names(rates), function(nm) {
     if (nrow(rates[[nm]]$ratio) == 0) {
         return(NULL)
     }
     data.frame(start = nm, rates[[nm]]$ratio)
 }))
-rate_lines <- rate_tab %>% filter(!is.na(`Rate r`))
+rate_lines <- rate_tab %>%
+    filter(!is.na(`Rate r`)) %>%
+    transmute(start = Start, rate = `Rate r`)
 
 ggplot(ratio_df, aes(iter, ratio, colour = start)) +
     geom_hline(
-        data = rate_lines, aes(yintercept = `Rate r`, colour = Start),
+        data = rate_lines, aes(yintercept = rate, colour = start),
         linetype = 2, linewidth = 0.5
     ) +
     geom_line(linewidth = 0.9) +
     coord_cartesian(ylim = c(0, 1.05)) +
     scale_colour_brewer(palette = "Dark2") +
     labs(
-        x = "Iteration", y = expression(d[t + 1] / d[t]), colour = "Start",
-        title = "Ratio of successive log-likelihood increments",
-        subtitle = "It levels off at the convergence rate r (dashed). The rate belongs to the data, not to the start."
+        x = "Iteration",
+        y = "Step size / previous step size",
+        colour = "Start",
+        title = "Ratio of successive parameter steps",
+        subtitle = "It levels off at the convergence rate r (dashed). The rate belongs to the optimum, not to the start."
     )
 
 # ------------------------------------------------------------------
-# 2. Simulation: how does the rate depend on separation and sample size?
+# 2. Simulation: how does the rate depend on the separation?
 # ------------------------------------------------------------------
 deltas <- c(0.5, 1, 1.5, 2, 3, 5)
-ns <- c(100, 500, 2000)
-R_rate <- 30 # replicates per (delta, n)  -> lower while testing
+n_rate <- 500
+R_rate <- 30 # replicates per delta  -> lower while testing
+max_iter_rate <- 5000
 true_pi <- 0.5
 
-run_rate_rep <- function(d, n, r) {
+run_rate_rep <- function(d, r) {
     set.seed(42 + r)
-    z <- rbinom(n, 1, 1 - true_pi)
-    xs <- rnorm(n, mean = d * z)
-    tr <- em_trace(xs, init_kmeans(xs, 2), max_iter = 5000)
+    z <- rbinom(n_rate, 1, 1 - true_pi)
+    xs <- rnorm(n_rate, mean = d * z)
+    tr <- em_trace(xs, init_kmeans(xs, 2), max_iter = max_iter_rate)
     rt <- em_rate(tr)
     last <- tr[nrow(tr), ]
     gam <- e_step(
@@ -139,80 +159,70 @@ run_rate_rep <- function(d, n, r) {
         sigma2 = unname(last[c("sigma2_1", "sigma2_2")])
     )$gamma
     data.frame(
-        delta = d, n = n, rep = r,
+        delta = d, rep = r,
         rate = rt$rate,
         iterations = nrow(tr) - 1,
-        converged = nrow(tr) < 5000,
+        converged = attr(tr, "status") == "converged",
         # average uncertainty of the class labels: 0 = labels clear, 0.5 = coin flips
         uncert = mean(1 - apply(gam, 1, max))
     )
 }
 
 rate_sim <- bind_rows(lapply(deltas, function(d) {
-    bind_rows(lapply(ns, function(n) {
-        bind_rows(lapply(seq_len(R_rate), function(r) run_rate_rep(d, n, r)))
-    }))
+    bind_rows(lapply(seq_len(R_rate), function(r) run_rate_rep(d, r)))
 }))
 set.seed(42)
 
+# The rate is NA when EM converges too fast to leave 3 usable ratios.
+# Those runs are dropped from the medians, so the share is reported.
 rate_sum <- rate_sim %>%
-    group_by(`Delta mu` = delta, n) %>%
+    group_by(`Delta mu` = delta) %>%
     summarise(
         `median rate` = median(rate, na.rm = TRUE),
         `iter. per digit` = -1 / log10(median(rate, na.rm = TRUE)),
         `median iterations` = median(iterations),
         `label uncertainty` = mean(uncert),
         `% not converged` = 100 * mean(!converged),
+        `% rate NA` = 100 * mean(is.na(rate)),
         .groups = "drop"
     )
 kable(
     rate_sum,
     digits = 3,
     caption = sprintf(
-        "Table 12. EM convergence rate by component separation and sample size (R = %d replicates per cell).",
-        R_rate
+        "Table 12. EM convergence rate by component separation (n = %d, R = %d replicates per separation).",
+        n_rate, R_rate
     )
 )
 
-# 2a. Rate vs separation (n = 500)
-ggplot(rate_sim %>% filter(n == 500, !is.na(rate)), aes(factor(delta), rate)) +
+# 2a. Rate vs separation
+ggplot(rate_sim %>% filter(!is.na(rate)), aes(factor(delta), rate)) +
     geom_boxplot(fill = "grey85", outlier.shape = NA) +
     geom_jitter(width = 0.15, alpha = 0.4, colour = "#1b9e77") +
     coord_cartesian(ylim = c(0, 1)) +
     labs(
         x = expression(Delta * mu ~ "(separation)"), y = "Convergence rate r (closer to 1 = slower)",
         title = "EM slows down when components overlap",
-        subtitle = "n = 500, one point per replicate"
+        subtitle = sprintf("n = %d, one point per replicate", n_rate)
     )
 
-# 2b. Rate vs separation for different sample sizes: the rate barely depends on n
-ggplot(rate_sum, aes(`Delta mu`, `median rate`, colour = factor(n))) +
-    geom_line(linewidth = 1) +
-    geom_point(size = 2.5) +
-    coord_cartesian(ylim = c(0, 1)) +
-    scale_colour_brewer(palette = "Dark2") +
-    labs(
-        x = expression(Delta * mu), y = "Median convergence rate", colour = "n",
-        title = "The rate is set by the separation, not by the sample size"
-    )
-
-# 2c. Why: rate vs uncertainty about the class labels
+# 2b. Why: rate vs uncertainty about the class labels
 ggplot(rate_sim %>% filter(!is.na(rate)), aes(uncert, rate, colour = factor(delta))) +
-    geom_point(aes(shape = factor(n)), size = 2, alpha = 0.7) +
+    geom_point(size = 2, alpha = 0.7) +
     scale_colour_brewer(palette = "Dark2") +
     coord_cartesian(ylim = c(0, 1)) +
     labs(
         x = "Average uncertainty of the class labels (1 - max responsibility)",
-        y = "Convergence rate r", colour = expression(Delta * mu), shape = "n",
+        y = "Convergence rate r", colour = expression(Delta * mu),
         title = "More label uncertainty = slower EM",
         subtitle = "When the E-step cannot tell which component a point belongs to, each step learns less."
     )
 
-# 2d. What the rate means in practice: iterations to converge
-ggplot(rate_sim %>% filter(n == 500), aes(factor(delta), iterations)) +
+# 2c. What the rate means in practice: iterations to converge
+ggplot(rate_sim, aes(factor(delta), iterations)) +
     geom_boxplot(fill = "grey85", outlier.alpha = 0.4) +
     scale_y_log10() +
     labs(
         x = expression(Delta * mu), y = "Iterations to converge (log scale)",
-        title = "Iterations needed (tolerance 1e-14, n = 500)"
+        title = sprintf("Iterations needed (tolerance 1e-14, n = %d)", n_rate)
     )

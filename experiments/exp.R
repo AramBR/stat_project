@@ -4,6 +4,9 @@ library(ggplot2)
 source("R/core.R")
 source("R/helpers.R")
 
+theme_set(theme_minimal(base_size = 12) + theme(legend.position = "bottom"))
+set.seed(42) # init_kmeans uses random k-means starts
+
 col2 <- c("Component 1" = "#1b9e77", "Component 2" = "#d95f02")
 
 # Load the data and pull out the waiting times as a vector
@@ -22,7 +25,10 @@ desc <- faithful %>%
         median = median(waiting),
         Q3 = quantile(waiting, .75),
         max = max(waiting),
-        skewness = mean((waiting - mean(waiting))^3) / sd(waiting)^3
+        # moment skewness: third central moment over (second central moment)^1.5,
+        # both with divisor n
+        skewness = mean((waiting - mean(waiting))^3) /
+            mean((waiting - mean(waiting))^2)^1.5
     )
 kable(
     desc,
@@ -80,7 +86,10 @@ comp_df <- bind_rows(lapply(1:2, function(k) {
         component = paste("Component", k)
     )
 }))
-cls <- data.frame(x = x, component = paste("Component", max.col(fit2$gamma)))
+cls <- data.frame(
+    x = x,
+    component = paste("Component", max.col(fit2$gamma, ties.method = "first"))
+)
 
 # Plot histogram, each component (dashed), the total mixture (solid), and coloured class assignments
 ggplot() +
@@ -112,7 +121,6 @@ ggplot() +
     scale_colour_manual(values = col2) +
     labs(x = "Waiting time (minutes)", y = "Density", colour = NULL)
 
-# avelacnel
 # Six different starting configurations (good, k-means, far apart, close means, unbalanced, saddle point)
 starts <- list(
     "S1 good guess" = list(
@@ -173,6 +181,8 @@ kable(
 traj <- bind_rows(lapply(names(runs1), function(nm) {
     data.frame(
         Start = nm,
+        # loglik_hist[1] is at the starting values, so this axis is
+        # (number of M-steps + 1); the + 1 keeps the log scale defined
         iteration = seq_along(runs1[[nm]]$loglik_hist),
         loglik = runs1[[nm]]$loglik_hist
     )
@@ -185,10 +195,8 @@ ggplot(traj, aes(iteration, loglik, colour = Start)) +
         ylim = c(max(-1200, min(traj$loglik)), max(traj$loglik) + 5)
     ) +
     labs(
-        x = "Iteration (log scale)",
+        x = "Iteration + 1 (log scale; 1 = starting values)",
         y = "Observed log-likelihood",
         colour = "Starting values"
     ) +
     scale_colour_brewer(palette = "Dark2")
-
-

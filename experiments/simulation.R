@@ -21,34 +21,14 @@ bayes_error <- function(delta, p1, s1 = 1, s2 = 1) {
     integrate(f, lower = -10 * s1, upper = delta + 10 * s2, subdivisions = 1000)$value
 }
 
-# Adjusted Rand Index between two label vectors
-adj_rand <- function(a, b) {
-    tab <- table(a, b)
-    choose2 <- function(m) m * (m - 1) / 2
-    sum_ij <- sum(choose2(tab))
-    sum_a <- sum(choose2(rowSums(tab)))
-    sum_b <- sum(choose2(colSums(tab)))
-    expected <- sum_a * sum_b / choose2(sum(tab))
-    max_idx <- (sum_a + sum_b) / 2
-    if (isTRUE(all.equal(max_idx, expected))) {
-        return(1)
-    }
-    (sum_ij - expected) / (max_idx - expected)
-}
-
-# One replicate: simulate data, fit EM, return one row of results
-run_rep <- function(d, r, n, p1, init = c("kmeans", "multistart")) {
-    init <- match.arg(init)
+# One replicate: simulate data, fit EM from a k-means start, return one row
+run_rep <- function(d, r, n, p1) {
     set.seed(42 + r) # reproducible dataset r (same z, noise across deltas)
     z <- rbinom(n, 1, 1 - p1) # z = 1 -> second component
     xs <- rnorm(n, mean = d * z, sd = 1)
 
     f <- tryCatch(
-        if (init == "kmeans") {
-            em_gmm(xs, init_kmeans(xs, 2), max_iter = 5000)
-        } else {
-            em_best(xs, 2, max_iter = 5000)
-        },
+        em_gmm(xs, init_kmeans(xs, 2), max_iter = 5000),
         error = function(e) NULL
     )
     if (is.null(f)) {
@@ -56,14 +36,16 @@ run_rep <- function(d, r, n, p1, init = c("kmeans", "multistart")) {
             delta = d, rep = r, n_obs = n, p1 = p1, status = "error",
             iterations = NA_integer_, pi1 = NA_real_, mu1 = NA_real_,
             mu2 = NA_real_, s1 = NA_real_, s2 = NA_real_,
-            misclass = NA_real_, misclass_perm = NA_real_, ari = NA_real_,
+            misclass = NA_real_, misclass_perm = NA_real_,
             ll_gap = NA_real_, monotone = NA
         ))
     }
 
-    pred <- max.col(f$gamma) - 1 # 0 = component 1, 1 = component 2
+    # ties.method = "first": the default ("random") breaks ties at random
+    pred <- max.col(f$gamma, ties.method = "first") - 1 # 0 = component 1, 1 = component 2
     mis <- mean(pred != z)
     # log-likelihood gap: fitted maximum minus likelihood at the true parameters
+    # (f$loglik is evaluated at exactly the returned parameters)
     ll_true <- gmm_loglikelihood(xs, c(p1, 1 - p1), c(0, d), c(1, 1))
 
     data.frame(
@@ -80,28 +62,28 @@ run_rep <- function(d, r, n, p1, init = c("kmeans", "multistart")) {
         s2 = sqrt(f$sigma2[2]),
         misclass = mis,
         misclass_perm = min(mis, 1 - mis), # invariant to label swap
-        ari = adj_rand(pred, z),
         ll_gap = f$loglik - ll_true,
         monotone = f$monotone
     )
 }
 
-# Full simulation over a grid of deltas (and optionally n, p1)
-run_sim <- function(deltas, R, n, p1, init = "kmeans") {
-    grid <- expand.grid(d = deltas, n = n, p1 = p1, r = seq_len(R))
+# Full simulation: R replicates for every delta
+run_sim <- function(deltas, R, n, p1) {
+    grid <- expand.grid(d = deltas, r = seq_len(R))
     out <- bind_rows(lapply(seq_len(nrow(grid)), function(i) {
-        run_rep(grid$d[i], grid$r[i], grid$n[i], grid$p1[i], init)
+        run_rep(grid$d[i], grid$r[i], n, p1)
     }))
     set.seed(42) # restore the global seed
     out
 }
 
-# Summary table: bias, RMSE, convergence, classification + Monte Carlo SEs
+# Summary table: bias, RMSE, convergence and classification per delta
 summarise_sim <- function(sim) {
     sim %>%
-        group_by(n_obs, p1, delta) %>%
+        group_by(delta) %>%
         summarise(
             R = n(),
+            p1 = first(p1),
             `bias pi` = mean(pi1 - p1, na.rm = TRUE),
             `RMSE pi` = sqrt(mean((pi1 - p1)^2, na.rm = TRUE)),
             `bias mu1` = mean(mu1 - 0, na.rm = TRUE),
@@ -110,12 +92,8 @@ summarise_sim <- function(sim) {
             `RMSE mu2` = sqrt(mean((mu2 - delta)^2, na.rm = TRUE)),
             `bias sigma1` = mean(s1 - 1, na.rm = TRUE),
             `bias sigma2` = mean(s2 - 1, na.rm = TRUE),
-            `MCSE bias pi` = sd(pi1, na.rm = TRUE) / sqrt(sum(!is.na(pi1))),
-            `MCSE bias mu1` = sd(mu1, na.rm = TRUE) / sqrt(sum(!is.na(mu1))),
-            `MCSE bias mu2` = sd(mu2, na.rm = TRUE) / sqrt(sum(!is.na(mu2))),
             `misclass. %` = 100 * mean(misclass_perm, na.rm = TRUE),
             `Bayes err. %` = 100 * bayes_error(first(delta), first(p1)),
-            `mean ARI` = mean(ari, na.rm = TRUE),
             `% label swaps` = 100 * mean(misclass > 0.5, na.rm = TRUE),
             `mean ll gap` = mean(ll_gap, na.rm = TRUE),
             `median iter` = median(iterations, na.rm = TRUE),
@@ -133,8 +111,7 @@ R2 <- 100
 n2 <- 500
 true_pi <- 0.5
 
-# init = "kmeans" reproduces the original study; "multistart" uses em_best()
-sim2 <- run_sim(deltas, R2, n2, true_pi, init = "kmeans")
+sim2 <- run_sim(deltas, R2, n2, true_pi)
 
 tab2 <- summarise_sim(sim2)
 
@@ -144,10 +121,14 @@ kable(
         select(
             `Delta mu` = delta, `bias pi`, `RMSE pi`, `bias mu1`, `RMSE mu1`,
             `bias mu2`, `RMSE mu2`, `bias sigma1`, `bias sigma2`,
-            `misclass. %`, `median iter`, `mean iter`, `% not conv./degen.`
+            `misclass. %`, `median iter`, `mean iter`, `% not conv./degen.`,
+            `% non-monotone`
         ),
     digits = 3,
-    caption = "Table 4. Parameter recovery and convergence of EM by component separation (R = 100 replicates, n = 500)."
+    caption = sprintf(
+        "Table 4. Parameter recovery and convergence of EM by component separation (R = %d replicates, n = %d). %% non-monotone should always be 0.",
+        R2, n2
+    )
 )
 
 # Table 5: classification quality against the Bayes-optimal benchmark
@@ -157,24 +138,10 @@ kable(
             `Delta mu` = delta,
             `misclass. %`, `Bayes err. %`,
             `excess %` = `misclass. %` - `Bayes err. %`,
-            `mean ARI`, `% label swaps`, `mean ll gap`
+            `% label swaps`, `mean ll gap`
         ),
     digits = 3,
     caption = "Table 5. Classification accuracy of EM vs the Bayes-optimal error, label swaps and log-likelihood gap to the truth."
-)
-
-# Table 6: Monte Carlo standard errors (how precise are the bias estimates?)
-kable(
-    tab2 %>%
-        select(
-            `Delta mu` = delta, R,
-            `bias pi`, `MCSE bias pi`,
-            `bias mu1`, `MCSE bias mu1`,
-            `bias mu2`, `MCSE bias mu2`,
-            `% non-monotone`
-        ),
-    digits = 4,
-    caption = "Table 6. Monte Carlo standard errors of the bias estimates and monotonicity check."
 )
 
 # ---- Plots ---------------------------------------------------------
@@ -238,16 +205,3 @@ ggplot(sim2, aes(factor(delta), fill = status)) +
         fill = "Status",
         title = "Convergence status by component separation"
     )
-
-# ---- Optional extensions (uncomment to run) -------------------------
-# Effect of sample size at fixed separation:
-# sim_n <- run_sim(deltas = c(1.5, 3), R = 100, n = c(50, 200, 500, 2000), p1 = 0.5)
-# kable(summarise_sim(sim_n), digits = 3)
-#
-# Unbalanced mixing proportions:
-# sim_p <- run_sim(deltas = c(1.5, 3), R = 100, n = 500, p1 = c(0.1, 0.3, 0.5))
-# kable(summarise_sim(sim_p), digits = 3)
-#
-# Single k-means start vs multi-start:
-# sim_ms <- run_sim(deltas, R2, n2, true_pi, init = "multistart")
-# kable(summarise_sim(sim_ms), digits = 3)
