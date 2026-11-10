@@ -44,13 +44,8 @@ B_ci <- 100 # bootstrap resamples per replicate
 n_ci <- 500
 true_pi <- 0.5
 level <- 0.95
-# Extra random starts per bootstrap resample. 0 = warm start from the
-# full-data fit only (fast, but may understate variability when components
-# overlap). Each extra start multiplies the run time.
-n_restarts_ci <- 0
 
-# total EM fits = length(deltas) * R_ci * B_ci * (1 + n_restarts_ci)
-#   -> lower R_ci / B_ci while testing
+# total EM fits = length(deltas) * R_ci * B_ci  -> lower R_ci / B_ci while testing
 
 run_ci_rep <- function(d, r) {
     set.seed(42 + r)
@@ -61,10 +56,7 @@ run_ci_rep <- function(d, r) {
     if (f$status == "degenerate") {
         return(NULL)
     }
-    ci <- gmm_ci(
-        xs, f,
-        B = B_ci, level = level, n_restarts = n_restarts_ci, max_iter = 1000
-    )
+    ci <- gmm_ci(xs, f, B = B_ci, level = level, max_iter = 1000)
     truth <- c(pi1 = true_pi, pi2 = 1 - true_pi, mu1 = 0, mu2 = d, sigma1 = 1, sigma2 = 1)
     ci$truth <- unname(truth[ci$parameter])
     ci$delta <- d
@@ -105,8 +97,8 @@ kable(
     ci_tab,
     digits = 3,
     caption = sprintf(
-        "Table 10. Bootstrap CI performance (up to %d replicates, B = %d, n = %d, %d extra starts per resample, nominal level %.0f%%).",
-        R_ci, B_ci, n_ci, n_restarts_ci, 100 * level
+        "Table 10. Bootstrap CI performance (up to %d replicates, B = %d, n = %d, nominal level %.0f%%).",
+        R_ci, B_ci, n_ci, 100 * level
     )
 )
 
@@ -145,17 +137,7 @@ ggplot(ci_tab, aes(`Delta mu`, `SE ratio`, colour = parameter)) +
         subtitle = "Above 1: SEs too large (conservative). Below 1: SEs too small (intervals too narrow)."
     )
 
-# 3c. Interval width shrinks as components separate
-ggplot(ci_sim, aes(factor(delta), upper - lower, fill = parameter)) +
-    geom_boxplot(outlier.alpha = 0.4) +
-    facet_wrap(~parameter, scales = "free_y") +
-    scale_fill_brewer(palette = "Dark2", guide = "none") +
-    labs(
-        x = expression(Delta * mu), y = "CI width",
-        title = "Interval width by component separation"
-    )
-
-# 3d. Caterpillar plot: every interval for one separation, miss = red
+# 3c. Caterpillar plot: every interval for one separation, miss = red
 delta_show <- 1.5
 cat_df <- ci_sim %>%
     filter(delta == delta_show) %>%
