@@ -9,12 +9,6 @@
 #   r = 0.99 -> ~230 iterations per extra correct digit
 # Overlapping components make the class labels uncertain, which slows EM down.
 # ==================================================================
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-library(knitr)
-source("R/core.R")
-source("R/helpers.R")
 
 theme_set(theme_minimal(base_size = 12) + theme(legend.position = "bottom"))
 
