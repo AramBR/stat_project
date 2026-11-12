@@ -1,18 +1,3 @@
-# ==================================================================
-# How EM works, step by step (Old Faithful waiting times, K = 2)
-#
-# Each EM iteration has two steps:
-#   E-step: for every point, compute the probability that it belongs to
-#           each component (its "responsibility"), given the current fit.
-#   M-step: refit each component as a weighted Gaussian, using those
-#           probabilities as weights (weighted mean, weighted variance,
-#           share of total weight = mixing proportion).
-# Repeating the two steps never lowers the log-likelihood.
-#
-# The figures show the fit at the start, at the points where a quarter, half,
-# three quarters and 95% of the total improvement has been made, and at the
-# end, starting from a deliberately poor guess so the changes are visible.
-# ==================================================================
 library(dplyr)
 library(ggplot2)
 source("R/core.R")
@@ -32,10 +17,6 @@ start <- list(pi = c(0.5, 0.5), mu = c(70, 72), sigma2 = c(13, 13)^2)
 tr <- em_trace(x, start, tol = 1e-8)
 n_iter <- nrow(tr) - 1
 
-# Which iterations to draw: the first iteration that has made 25%, 50%, 75%
-# and 95% of the total log-likelihood gain (plus the start and the end).
-# From this start EM barely moves at first and then changes quickly, so fixed
-# iteration numbers would show several identical panels.
 ll <- tr[, "loglik"]
 progress <- (ll - ll[1]) / (ll[n_iter + 1] - ll[1])
 shown <- unique(c(
@@ -76,8 +57,6 @@ curves <- bind_rows(lapply(shown, function(t) {
 })) %>%
     mutate(panel = factor(panel, levels = panel_levels))
 
-# Responsibilities (E-step) for every shown iteration:
-# probability that each point belongs to component 2
 resp <- bind_rows(lapply(shown, function(t) {
     f <- fit_at(t)
     g <- e_step(x, f$pi, f$mu, f$sigma2)$gamma
@@ -85,9 +64,6 @@ resp <- bind_rows(lapply(shown, function(t) {
 })) %>%
     mutate(panel = factor(panel, levels = panel_levels))
 
-# ------------------------------------------------------------------
-# Figure 1. The fit after each shown iteration
-# ------------------------------------------------------------------
 ggplot() +
     geom_histogram(
         data = faithful, aes(waiting, after_stat(density)),
@@ -121,9 +97,6 @@ ggplot() +
         )
     )
 
-# ------------------------------------------------------------------
-# Figure 2. The log-likelihood rises at every step
-# ------------------------------------------------------------------
 ll_df <- data.frame(iter = tr[, "iter"], loglik = tr[, "loglik"])
 
 ggplot(ll_df, aes(iter, loglik)) +

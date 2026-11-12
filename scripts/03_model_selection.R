@@ -1,41 +1,17 @@
-# ==================================================================
-# How many components? Choosing K with AIC and BIC
-#
-# Adding components always raises the log-likelihood (a bigger model can
-# always fit at least as well), so the log-likelihood alone would always
-# pick the largest K. AIC and BIC add a penalty for every extra parameter:
-#   AIC = -2 * loglik + 2 * p
-#   BIC = -2 * loglik + log(n) * p        (p = 3K - 1 parameters)
-# Smaller is better. BIC's penalty is larger (log(272) = 5.6 > 2 for Faithful), so BIC
-# prefers smaller models than AIC.
-# ==================================================================
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-library(knitr)
 source("R/core.R")
 source("R/helpers.R")
 
 theme_set(theme_minimal(base_size = 12) + theme(legend.position = "bottom"))
 crit_cols <- c(AIC = "#7570b3", BIC = "#d95f02")
 
-# ------------------------------------------------------------------
-# 1. Old Faithful: which K do AIC and BIC choose?
-# ------------------------------------------------------------------
 data(faithful)
 x <- faithful$waiting
 set.seed(42)
 
 sel <- select_K(x, K_range = 1:6, n_random = 10)
-
-kable(
-    sel$table %>% select(K, npar, loglik, AIC, BIC, dAIC, dBIC, status),
-    digits = 2,
-    caption = sprintf(
-        "Table 13. Model selection for the Faithful waiting times. AIC chooses K = %d, BIC chooses K = %d.",
-        sel$K_aic, sel$K_bic
-    )
-)
 
 # 1a. Criteria against K (the minimum is the chosen model)
 crit_df <- sel$table %>%

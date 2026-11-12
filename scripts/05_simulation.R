@@ -1,3 +1,12 @@
+# ==================================================================
+# Simulation: does EM recover the true parameters?
+#
+# We generate data where the truth is KNOWN,
+#   x ~ 0.5 * N(0, 1) + 0.5 * N(delta, 1),
+# fit EM, and compare the estimates with the truth. delta is the distance
+# between the two means: small delta = the groups overlap, large delta =
+# the groups are clearly separate.
+# ==================================================================
 library(dplyr)
 library(tidyr)
 library(knitr)
@@ -7,6 +16,7 @@ source("R/helpers.R")
 
 theme_set(theme_minimal(base_size = 12) + theme(legend.position = "bottom"))
 
+# ---- One dataset ---------------------------------------------------
 
 # Simulate one dataset, fit EM from a k-means start, return one row of results
 run_rep <- function(d, r, n, p1) {
@@ -34,12 +44,16 @@ run_rep <- function(d, r, n, p1) {
         s1 = sqrt(f$sigma2[1]),
         s2 = sqrt(f$sigma2[2]),
         # EM names its components by their means, so with heavy overlap it can
+        # call group 1 "component 2" (all labels reversed). min(mis, 1 - mis)
+        # counts the errors without caring which name each group got.
         misclass = min(mis, 1 - mis),
         # how much better EM's fit explains this data than the true parameters
         ll_gap = f$loglik - ll_true,
         monotone = f$monotone
     )
 }
+
+# ---- Run -----------------------------------------------------------
 
 deltas <- c(0.5, 1.5, 3.0, 5.0)
 R2 <- 100 # datasets per delta
@@ -52,7 +66,10 @@ sim2 <- bind_rows(lapply(seq_len(nrow(grid)), function(i) {
 }))
 set.seed(42) # restore the global seed
 
+# ---- Tables --------------------------------------------------------
 
+# RMSE ("typical error") = sqrt(mean((estimate - truth)^2)):
+# how far the estimate is from the truth on average, in the units of the parameter.
 rmse <- function(est, truth) sqrt(mean((est - truth)^2))
 
 # Table 4: how accurate are the estimates?
@@ -95,6 +112,8 @@ kable(
     )
 )
 
+# ---- Plots ---------------------------------------------------------
+
 # Estimation errors (estimate - truth) per parameter and separation
 err <- sim2 %>%
     mutate(
@@ -113,7 +132,7 @@ ggplot(err, aes(delta_f, error)) +
     geom_boxplot(fill = "grey85", outlier.alpha = 0.4) +
     facet_wrap(~parameter, scales = "free_y") +
     labs(
-        x = "Δμ (true separation)",
+        x = "\u0394\u03bc (true separation)",
         y = "Estimate - truth",
         title = "EM estimation error by component separation",
         subtitle = "Dashed line = exactly right. Narrow boxes around 0 = accurate estimates."
@@ -125,7 +144,7 @@ ggplot(tab_fit, aes(`Delta mu`, `misclassified %`)) +
     geom_point(size = 2.5, colour = "#d95f02") +
     scale_y_continuous(limits = c(0, 50)) +
     labs(
-        x = "Δμ",
+        x = "\u0394\u03bc",
         y = "Points in the wrong group (%)",
         title = "EM classification error by component separation",
         subtitle = "50% would be a coin flip."
@@ -136,7 +155,7 @@ ggplot(sim2, aes(factor(delta), iterations)) +
     geom_boxplot(fill = "grey85", outlier.alpha = 0.4) +
     scale_y_log10() +
     labs(
-        x = "Δμ",
+        x = "\u0394\u03bc",
         y = "EM iterations (log scale)",
         title = "Convergence speed by component separation"
     )
@@ -147,7 +166,7 @@ ggplot(sim2, aes(factor(delta), fill = status)) +
     scale_y_continuous(labels = scales::percent) +
     scale_fill_brewer(palette = "Set2") +
     labs(
-        x = "Δμ",
+        x = "\u0394\u03bc",
         y = "Share of datasets",
         fill = "Status",
         title = "Convergence status by component separation"

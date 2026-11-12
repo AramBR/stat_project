@@ -1,7 +1,3 @@
-# Joint log-density matrix
-# Computes the n x K matrix of log-weights + log-densities:
-# L[i, k] = log(pi_k) + log(phi(x_i; mu_k, sigma_k^2))
-# Always returns an n x K matrix (also for n = 1 or K = 1).
 log_dens_matrix <- function(x, pi, mu, sigma2) {
     n <- length(x)
     K <- length(pi)
@@ -13,9 +9,6 @@ log_dens_matrix <- function(x, pi, mu, sigma2) {
     L
 }
 
-# Row-wise Log-Sum-Exp
-# Computes log(sum(exp(L[i, ]))) stably using the max-trick.
-# Rows that are entirely -Inf give -Inf (instead of NaN).
 log_sum_exp <- function(L) {
     L <- as.matrix(L)
     # Row maximum for scaling
@@ -31,9 +24,6 @@ gmm_loglikelihood <- function(x, pi, mu, sigma2) {
     sum(log_sum_exp(log_dens_matrix(x, pi, mu, sigma2)))
 }
 
-# E-Step (Expectation)
-# Computes posterior responsibilities gamma_ik and the log-likelihood
-# at current parameter values.
 e_step <- function(x, pi, mu, sigma2) {
     L <- log_dens_matrix(x, pi, mu, sigma2)
     lse <- log_sum_exp(L)
@@ -45,10 +35,6 @@ e_step <- function(x, pi, mu, sigma2) {
     )
 }
 
-# M-Step (Maximization)
-# Updates mixture weights, means, and variances.
-# Flags cluster collapse: a component with (almost) no weight, a non-finite
-# estimate, or a variance below the floor.
 m_step <- function(x, gamma, var_floor) {
     n <- length(x)
     nk <- colSums(gamma)
@@ -68,21 +54,6 @@ m_step <- function(x, gamma, var_floor) {
     )
 }
 
-# EM Algorithm for 1D Gaussian Mixture Models
-# x Vector of observations
-# init List containing starting values: pi, mu, sigma2
-# tol Relative convergence tolerance
-# max_iter Maximum number of EM iterations (M-steps)
-# var_floor Minimum allowable variance (prevents singularity)
-#
-# Conventions of the returned object:
-#   iterations  number of parameter updates (M-steps) actually accepted
-#   loglik_hist log-likelihood at the start values (first entry) and after
-#               every accepted M-step, so length = iterations + 1
-#   loglik      log-likelihood at exactly the returned parameters
-#   status      "converged", "max_iter reached" or "degenerate"; a degenerate
-#               M-step is NOT accepted, so the returned parameters are the
-#               last valid ones
 em_gmm <- function(
     x,
     init,
